@@ -1,0 +1,3 @@
+pandas
+apache-airflow-providers-mongo
+pymongo
