@@ -2,7 +2,6 @@ import pandas as pd
 import os
 import glob
 from datetime import datetime
-from dotenv import load_dotenv
 
 from airflow import DAG
 from airflow.sensors.filesystem import FileSensor
@@ -21,12 +20,19 @@ def get_fs_base_path(conn_id: str = "fs_default") -> str:
         raise ValueError(f" Connection {conn_id} has no 'path' in extra")
     return base_path
 
-
+def _getFilePath()->str:
+    """Функция на получение пути новго файла"""
+    base_dir = get_fs_base_path("fs_default")   
+    pattern = os.path.join(base_dir, "*.csv")
+    files = glob.glob(pattern)
+    if not files:
+        return ""
+    return files[0]
 
 with DAG(
-    dag_id="file_sensor_branch_dag1",
+    dag_id="file_sensor_branch_dag",
     start_date=datetime(2025, 11, 18),
-    schedule_interval=None,          # запускаешь руками
+    schedule_interval=None,
     catchup=False,
     tags=["practice"],
 ) as dag:
@@ -44,33 +50,48 @@ with DAG(
     # 2. Branch-таска: проверяем, пустой файл или нет
     @task.branch(task_id="check_file_is_empty")
     def check_file_is_empty() -> str:
-        base_dir = get_fs_base_path("fs_default")   
-        pattern = os.path.join(base_dir, "*.csv")
-        files = glob.glob(pattern)
-
-        if not files:
-            # Нет вообще ни одного CSV — отдельная ветка
-            return "no_csv_found"
-
-        file_path = files[0]   # берём первый попавшийся, для учебной задачи норм
+        file_path = _getFilePath()
         size = os.path.getsize(file_path)
 
         if size > 0:
-            return "process_file"
+            return "data_processing.replace_nulls"
         else:
             return "empty_file"
     branch = check_file_is_empty()
 
-    process_file = BashOperator(
-        task_id="process_file",
-        bash_command="echo 'File is NOT EMPTY, nothing to do'; sleep 5",
-    )
-
-    # 3. Ветвь, если файл пустой
+   # 3. Ветвь, если файл пустой
     empty_file = BashOperator(
         task_id="empty_file",
         bash_command="echo 'File is EMPTY, nothing to do'; sleep 5",
     )
 
+    # 4. Ветвь, если файл НЕ пустой — TaskGroup с обработкой данных
+    with TaskGroup(group_id='data_processing') as data_processing:
+        # Заменяем "null" на "-"
+        def replace_nulls():
+            """Заменить все значения 'null' на '-'"""
+            df = pd.read_csv(_getFilePath())
+            df = df.replace("null", "-")
+        # Сортируем по created_date
+        def sort_by_date():
+            pass
+
+        # Чистим content от эмодзи и лишних символов
+        def clean_content():
+            pass
+        replace_nulls = PythonOperator(
+            task_id="replace_nulls",
+            python_callable=replace_nulls,
+        )
+        sort_by_date = PythonOperator(
+            task_id='sort_by_date',
+            python_callable=sort_by_date,
+        )
+        clean_content = PythonOperator(
+            task_id='clean_data',
+            python_callable=clean_content,
+        )
+        replace_nulls >> sort_by_date >> clean_content
+    
     # Задаём зависимости
-    wait_for_file >> branch >> [process_file, empty_file]
+    wait_for_file >> branch >> [empty_file, data_processing]
