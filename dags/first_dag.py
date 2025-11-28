@@ -1,10 +1,26 @@
-from datetime import datetime
+import pandas as pd
 import os
+import glob
+from datetime import datetime
+from dotenv import load_dotenv
 
 from airflow import DAG
 from airflow.sensors.filesystem import FileSensor
 from airflow.operators.bash import BashOperator
 from airflow.decorators import task
+from airflow.utils.task_group import TaskGroup
+from airflow.operators.python import PythonOperator
+from airflow.hooks.base import BaseHook
+
+def get_fs_base_path(conn_id: str = "fs_default") -> str:
+    """Достаём path из extra коннекта fs_default."""
+    conn = BaseHook.get_connection(conn_id)
+    extra = conn.extra_dejson or {}
+    base_path = extra.get("path")
+    if not base_path:
+        raise ValueError(f" Connection {conn_id} has no 'path' in extra")
+    return base_path
+
 
 
 with DAG(
@@ -18,40 +34,39 @@ with DAG(
     # 1. Сенсор: ждём появления файла
     wait_for_file = FileSensor(
         task_id="wait_for_file1",
-        fs_conn_id="fs_default",     # коннект к ФС из UI
-        filepath="input_data/test.csv",       # относительно path из fs_default
-        poke_interval=60,            # раз в 60 секунд
-        timeout=600,                 # максимум 10 минут
-        mode="poke",                 # или "reschedule"
+        fs_conn_id="fs_default",
+        filepath=".",
+        poke_interval=10,           
+        timeout=600,
+        mode="poke",
     )
 
     # 2. Branch-таска: проверяем, пустой файл или нет
     @task.branch(task_id="check_file_is_empty")
     def check_file_is_empty() -> str:
-        # путь к файлу внутри контейнера
-        file_path = "/opt/airflow/data/input_data/test.csv"
+        base_dir = get_fs_base_path("fs_default")   
+        pattern = os.path.join(base_dir, "*.csv")
+        files = glob.glob(pattern)
 
-        if not os.path.exists(file_path):
-            # чисто на всякий случай — если файл пропал
-            raise FileNotFoundError(f"File not found: {file_path}")
+        if not files:
+            # Нет вообще ни одного CSV — отдельная ветка
+            return "no_csv_found"
 
+        file_path = files[0]   # берём первый попавшийся, для учебной задачи норм
         size = os.path.getsize(file_path)
+
         if size > 0:
-            # говорим Airflow идти в таску process_file
             return "process_file"
         else:
-            # если пустой — идём в таску empty_file
             return "empty_file"
-
     branch = check_file_is_empty()
 
-    # 3. Ветвь, если файл НЕ пустой
     process_file = BashOperator(
         task_id="process_file",
-        bash_command="echo 'File is NOT empty, processing...'; sleep 5",
+        bash_command="echo 'File is NOT EMPTY, nothing to do'; sleep 5",
     )
 
-    # 4. Ветвь, если файл пустой
+    # 3. Ветвь, если файл пустой
     empty_file = BashOperator(
         task_id="empty_file",
         bash_command="echo 'File is EMPTY, nothing to do'; sleep 5",
