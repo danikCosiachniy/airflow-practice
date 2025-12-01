@@ -1,5 +1,6 @@
 import pandas as pd
 import os
+import re
 import glob
 from datetime import datetime
 
@@ -50,9 +51,9 @@ with DAG(
     # 2. Branch-таска: проверяем, пустой файл или нет
     @task.branch(task_id="check_file_is_empty")
     def check_file_is_empty() -> str:
+        """Функция на проверку пустой файл или нет"""
         file_path = _getFilePath()
         size = os.path.getsize(file_path)
-
         if size > 0:
             return "data_processing.replace_nulls"
         else:
@@ -67,18 +68,46 @@ with DAG(
 
     # 4. Ветвь, если файл НЕ пустой — TaskGroup с обработкой данных
     with TaskGroup(group_id='data_processing') as data_processing:
-        # Заменяем "null" на "-"
         def replace_nulls():
             """Заменить все значения 'null' на '-'"""
-            df = pd.read_csv(_getFilePath())
+            # Читаем путь файла
+            file_path = _getFilePath()
+            # Читаем CSV
+            df = pd.read_csv(file_path)
+            # Заменяем null на -
             df = df.replace("null", "-")
-        # Сортируем по created_date
+            # Записываем в тот же файл
+            df.to_csv(file_path, index=False)
+        
         def sort_by_date():
-            pass
-
-        # Чистим content от эмодзи и лишних символов
+            """Сортируем по created_date"""
+            # Читаем путь файла
+            file_path = _getFilePath()
+            # Читаем файл и парсим столбец даты
+            df = pd.read_csv(file_path, parse_dates=["at"])
+            # Сортируем 
+            df = df.sort_values("at")
+            # Записываем результат в тот же файл 
+            df.to_csv(file_path, index=False)
+        
+        def _clean_text(text):
+            """Приватная функция на удаление части строки несоотвествующей регулярному выражению"""
+            if not isinstance(text, str):
+                return text
+            return re.sub(r"[^\w\s.,!?;:()\"'-]", "", text)
+        
         def clean_content():
-            pass
+            """Чистим content от эмодзи и лишних символов"""
+            # Читаем путь к файлу
+            file_path = _getFilePath()
+            # Читаем файл
+            df = pd.read_csv(file_path)
+            if "content" in df.columns:
+                # Чистим колонку контента через функцию _clean_text
+                df["content"] = df["content"].apply(_clean_text)
+            # Записываем в тот же файл 
+            df.to_csv(file_path, index=False)
+
         replace_nulls = PythonOperator(
             task_id="replace_nulls",
             python_callable=replace_nulls,
@@ -91,7 +120,8 @@ with DAG(
             task_id='clean_data',
             python_callable=clean_content,
         )
+        # Задаем зависимоти внутри таскГруппы 
         replace_nulls >> sort_by_date >> clean_content
     
-    # Задаём зависимости
+    # Задаем зависимости
     wait_for_file >> branch >> [empty_file, data_processing]
