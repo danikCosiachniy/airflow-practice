@@ -11,6 +11,7 @@ from airflow.decorators import task
 from airflow.utils.task_group import TaskGroup
 from airflow.operators.python import PythonOperator
 from airflow.hooks.base import BaseHook
+from airflow.datasets import Dataset
 
 def get_fs_base_path(conn_id: str = "fs_default") -> str:
     """Достаём path из extra коннекта fs_default."""
@@ -29,6 +30,9 @@ def _getFilePath()->str:
     if not files:
         return ""
     return files[0]
+
+# Константа на путь к результирующему файлу
+FILE_DATASET = Dataset(f"file://{_getFilePath()}")
 
 with DAG(
     dag_id="file_sensor_branch_dag",
@@ -119,6 +123,7 @@ with DAG(
         clean_content = PythonOperator(
             task_id='clean_data',
             python_callable=clean_content,
+            outlets=[FILE_DATASET]
         )
         # Задаем зависимоти внутри таскГруппы 
         replace_nulls >> sort_by_date >> clean_content
