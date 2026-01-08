@@ -5,34 +5,14 @@ import glob
 from datetime import datetime
 
 from airflow import DAG
-from airflow.sensors.filesystem import FileSensor
+from airflow.sensors.python import PythonSensor
 from airflow.operators.bash import BashOperator
 from airflow.decorators import task
 from airflow.utils.task_group import TaskGroup
 from airflow.operators.python import PythonOperator
-from airflow.hooks.base import BaseHook
-from airflow.datasets import Dataset
 
-def get_fs_base_path(conn_id: str = "fs_default") -> str:
-    """Достаём path из extra коннекта fs_default."""
-    conn = BaseHook.get_connection(conn_id)
-    extra = conn.extra_dejson or {}
-    base_path = extra.get("path")
-    if not base_path:
-        raise ValueError(f" Connection {conn_id} has no 'path' in extra")
-    return base_path
-
-def _getFilePath()->str:
-    """Функция на получение пути новго файла"""
-    base_dir = get_fs_base_path("fs_default")   
-    pattern = os.path.join(base_dir, "*.csv")
-    files = glob.glob(pattern)
-    if not files:
-        return ""
-    return files[0]
-
-# Константа на путь к результирующему файлу
-FILE_DATASET = Dataset(f"file://{_getFilePath()}")
+from utils.constants import FILE_DATASET
+from utils.get_filepath import getFilePath
 
 with DAG(
     dag_id="file_sensor_branch_dag",
@@ -41,22 +21,23 @@ with DAG(
     catchup=False,
     tags=["practice"],
 ) as dag:
+    def file_appeared() -> bool:
+        return bool(getFilePath())
 
     # 1. Сенсор: ждём появления файла
-    wait_for_file = FileSensor(
-        task_id="wait_for_file1",
-        fs_conn_id="fs_default",
-        filepath=".",
-        poke_interval=10,           
-        timeout=600,
-        mode="poke",
-    )
+    wait_for_file = PythonSensor(
+    task_id="wait_for_file1",
+    python_callable=file_appeared,
+    poke_interval=10,
+    timeout=600,
+    mode="reschedule",
+)
 
     # 2. Branch-таска: проверяем, пустой файл или нет
     @task.branch(task_id="check_file_is_empty")
     def check_file_is_empty() -> str:
         """Функция на проверку пустой файл или нет"""
-        file_path = _getFilePath()
+        file_path = getFilePath()
         size = os.path.getsize(file_path)
         if size > 0:
             return "data_processing.replace_nulls"
@@ -75,7 +56,7 @@ with DAG(
         def replace_nulls():
             """Заменить все значения 'null' на '-'"""
             # Читаем путь файла
-            file_path = _getFilePath()
+            file_path = getFilePath()
             # Читаем CSV
             df = pd.read_csv(file_path)
             # Заменяем null на -
@@ -86,7 +67,7 @@ with DAG(
         def sort_by_date():
             """Сортируем по created_date"""
             # Читаем путь файла
-            file_path = _getFilePath()
+            file_path = getFilePath()
             # Читаем файл и парсим столбец даты
             df = pd.read_csv(file_path, parse_dates=["at"])
             # Сортируем 
@@ -103,7 +84,7 @@ with DAG(
         def clean_content():
             """Чистим content от эмодзи и лишних символов"""
             # Читаем путь к файлу
-            file_path = _getFilePath()
+            file_path = getFilePath()
             # Читаем файл
             df = pd.read_csv(file_path)
             if "content" in df.columns:
