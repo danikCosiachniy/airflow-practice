@@ -4,6 +4,7 @@ from datetime import datetime
 import pandas as pd
 from airflow import DAG
 from airflow.operators.python import PythonOperator
+from airflow.operators.trigger_dagrun import TriggerDagRunOperator
 from airflow.providers.mongo.hooks.mongo import MongoHook
 from pymongo.errors import BulkWriteError
 
@@ -26,6 +27,9 @@ def load_to_mongo() -> None:
     if not path or not os.path.exists(path):
         raise FileNotFoundError(f'CSV not found: {path}')
 
+    file_size_bytes = os.path.getsize(path)
+    print(f'Using CSV: {path} (size_bytes={file_size_bytes})')
+
     df = pd.read_csv(path)
 
     records = df.to_dict(orient='records')
@@ -44,24 +48,39 @@ def load_to_mongo() -> None:
     hook = MongoHook(mongo_conn_id='mongo_default')
     collection = hook.get_collection(mongo_collection='processed_data')
 
-    try:
-        result = collection.insert_many(docs, ordered=False)
-        print(f'Inserted {len(result.inserted_ids)} documents into MongoDB')
-    except BulkWriteError as e:
-        details = e.details or {}
-        inserted = details.get('nInserted', 0)
-        write_errors = details.get('writeErrors', []) or []
-        dupes = sum(1 for we in write_errors if we.get('code') == 11000)
-        other_errors = len(write_errors) - dupes
+    # Insert in small batches to avoid MongoDB 16MB message limit.
+    BATCH_SIZE = 1000
 
-        print(
-            'Mongo insert completed with errors. '
-            f'inserted={inserted}, duplicates_ignored={dupes}, other_errors={other_errors}'
-        )
+    total_inserted = 0
+    total_dupes = 0
 
-        # If there were non-duplicate errors, fail the task.
-        if other_errors:
-            raise
+    for i in range(0, len(docs), BATCH_SIZE):
+        batch = docs[i : i + BATCH_SIZE]
+        try:
+            res = collection.insert_many(batch, ordered=False)
+            total_inserted += len(res.inserted_ids)
+        except BulkWriteError as e:
+            details = e.details or {}
+            inserted = details.get('nInserted', 0)
+            write_errors = details.get('writeErrors', []) or []
+            dupes = sum(1 for we in write_errors if we.get('code') == 11000)
+            other_errors = len(write_errors) - dupes
+
+            total_inserted += inserted
+            total_dupes += dupes
+
+            # If there were non-duplicate errors, fail the task.
+            if other_errors:
+                print(
+                    'Mongo insert batch failed with non-duplicate errors. '
+                    f'batch_start={i}, inserted={inserted}, duplicates_ignored={dupes}, other_errors={other_errors}'
+                )
+                raise
+
+    print(
+        'Mongo load finished. '
+        f'rows_read={len(docs)}, inserted={total_inserted}, duplicates_ignored={total_dupes}'
+    )
 
 
 with DAG(
@@ -75,3 +94,18 @@ with DAG(
         task_id='load_to_mongo',
         python_callable=load_to_mongo,
     )
+
+    trigger_queries = TriggerDagRunOperator(
+        task_id='trigger_mongo_queries',
+        trigger_dag_id='mongo_queries_dag',
+        # Make the triggered run id unique and traceable to the source run.
+        trigger_run_id='triggered_by_mongo_dag__{{ run_id }}',
+        conf={
+            'source_dag_id': 'mongo_dag',
+            'source_run_id': '{{ run_id }}',
+            'source_logical_date': '{{ logical_date }}',
+        },
+        wait_for_completion=False,
+    )
+
+    load_data >> trigger_queries
