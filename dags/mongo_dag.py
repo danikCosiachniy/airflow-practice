@@ -1,80 +1,77 @@
-import hashlib
 import os
 from datetime import datetime
 
 import pandas as pd
-from utils.get_filepath import getFilePath
-from utils.constants import FILE_DATASET
-from pymongo import UpdateOne
-
 from airflow import DAG
 from airflow.operators.python import PythonOperator
 from airflow.providers.mongo.hooks.mongo import MongoHook
+from pymongo.errors import BulkWriteError
 
-def _make_id(row: dict) -> str:
-    """
-    Чтобы не плодить дубликаты при повторном запуске:
-    1) если в данных есть id/comment_id — используем
-    2) иначе делаем sha1 по набору полей
-    """
-    for k in ("_id", "id", "comment_id"):
-        v = row.get(k)
-        if v is not None and str(v).strip() != "":
-            return str(v)
-
-    payload = f"{row.get('created_date','')}|{row.get('content','')}|{row.get('rating','')}"
-    return hashlib.sha1(payload.encode("utf-8", errors="ignore")).hexdigest()
+from utils.constants import FILE_DATASET
+from utils.get_filepath import getFilePath
 
 
 def load_to_mongo() -> None:
-    path = getFilePath()
-    if not os.path.exists(path):
-        raise FileNotFoundError(f"Final CSV not found: {path}")
+    """Load the processed CSV into MongoDB.
 
-    # 1) читаем CSV
+    Deduplication rule:
+      - Only by `reviewId`.
+        If `reviewId` is present, it is used as MongoDB `_id`.
+        Duplicate `reviewId` values are ignored on insert.
+
+    No other transformations are applied.
+    """
+
+    path = getFilePath()
+    if not path or not os.path.exists(path):
+        raise FileNotFoundError(f'CSV not found: {path}')
+
     df = pd.read_csv(path)
 
-    if "rating" in df.columns:
-        df["rating"] = pd.to_numeric(df["rating"], errors="coerce")
-
-    records = df.to_dict(orient="records")
+    records = df.to_dict(orient='records')
     if not records:
-        print("No records to insert into MongoDB")
+        print('No records to insert into MongoDB')
         return
 
-    # 3) готовим документы + _id
-    docs = []
+    # Use ONLY reviewId to deduplicate.
+    docs: list[dict] = []
     for r in records:
-        r["_id"] = _make_id(r)
-
-        # Timestamp -> python datetime (BSON Date)
-        if isinstance(r.get("created_date"), pd.Timestamp):
-            r["created_date"] = r["created_date"].to_pydatetime()
-
+        review_id = r.get('reviewId')
+        if review_id is not None and str(review_id).strip() != '':
+            r['_id'] = str(review_id)
         docs.append(r)
 
-    # 4) подключаемся к Mongo через Airflow Connection
-    hook = MongoHook(mongo_conn_id="mongo_default")
-    collection = hook.get_collection(mongo_collection="processed_data")
+    hook = MongoHook(mongo_conn_id='mongo_default')
+    collection = hook.get_collection(mongo_collection='processed_data')
 
-    # 5) upsert (без дублей)
-    ops = [UpdateOne({"_id": d["_id"]}, {"$set": d}, upsert=True) for d in docs]
-    result = collection.bulk_write(ops, ordered=False)
+    try:
+        result = collection.insert_many(docs, ordered=False)
+        print(f'Inserted {len(result.inserted_ids)} documents into MongoDB')
+    except BulkWriteError as e:
+        details = e.details or {}
+        inserted = details.get('nInserted', 0)
+        write_errors = details.get('writeErrors', []) or []
+        dupes = sum(1 for we in write_errors if we.get('code') == 11000)
+        other_errors = len(write_errors) - dupes
 
-    print(
-        f"Mongo upsert done. "
-        f"matched={result.matched_count}, modified={result.modified_count}, upserted={len(result.upserted_ids)}"
-    )
+        print(
+            'Mongo insert completed with errors. '
+            f'inserted={inserted}, duplicates_ignored={dupes}, other_errors={other_errors}'
+        )
+
+        # If there were non-duplicate errors, fail the task.
+        if other_errors:
+            raise
 
 
 with DAG(
-    dag_id="mongo_dag",
+    dag_id='mongo_dag',
     start_date=datetime(2025, 11, 18),
     schedule=[FILE_DATASET],
     catchup=False,
-    tags=["practice", "mongo"],
+    tags=['practice', 'mongo'],
 ) as dag:
     load_data = PythonOperator(
-        task_id="load_to_mongo",
+        task_id='load_to_mongo',
         python_callable=load_to_mongo,
     )

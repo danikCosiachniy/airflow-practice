@@ -1,0 +1,54 @@
+[project]
+name = "airflow_mongo_practice"
+version = "0.1.0"
+description = "Airflow DAGs: file sensor + pandas transforms + dataset-triggered load to MongoDB"
+readme = "README.md"
+requires-python = ">=3.11,<3.12"
+dependencies = [
+    "apache-airflow==2.10.5",
+    "pandas>=2.1,<3",
+    "pymongo>=4.6,<6",
+    "apache-airflow-providers-mongo",
+]
+
+[dependency-groups]
+dev = [
+    "pre-commit==3.5.0",
+    "pytest==8.0.0",
+    "ruff==0.3.0",
+    "black==24.4.2",
+]
+
+[tool.black]
+line-length = 100
+target-version = ["py311"]
+preview = true
+skip-string-normalization = true
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+exclude = [
+    ".bzr", ".direnv", ".eggs", ".git", ".hg", ".mypy_cache", ".tox", ".venv", "venv",
+    "_build", "buck-out", "build", "dist", "node_modules",
+    "__pycache__",
+]
+
+[tool.ruff.format]
+quote-style = "single"
+indent-style = "space"
+docstring-code-format = true
+
+[tool.ruff.lint]
+select = [
+    "E", "W", "UP", "F", "B", "I",
+    "RUF", "SIM", "RET", "PIE",
+]
+ignore = [
+    "E501",   # line length (black)
+    "S101",   # assert usage
+    "B008",   # function call in defaults
+]
+
+[tool.ruff.lint.isort]
+known-first-party = ["utils", "dags"]

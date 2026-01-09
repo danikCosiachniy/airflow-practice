@@ -11,8 +11,7 @@ services:
       timeout: 5s
       retries: 5
     restart: always
-    networks:
-      - airflow-net
+    networks: [airflow-net]
     volumes:
       - postgres_data:/var/lib/postgresql/data
 
@@ -21,13 +20,16 @@ services:
     restart: always
     ports:
       - "27017:27017"
-    networks:
-      - airflow-net
+    networks: [airflow-net]
+    environment:
+      MONGO_INITDB_ROOT_USERNAME: ${MONGO_ROOT_USERNAME}
+      MONGO_INITDB_ROOT_PASSWORD: ${MONGO_ROOT_PASSWORD}
     volumes:
       - mongo_data:/data/db
 
   airflow-init:
     build: .
+    user: "50000:0"
     env_file:
       - .env
     depends_on:
@@ -35,32 +37,48 @@ services:
         condition: service_healthy
       mongo:
         condition: service_started
-    networks:
-      - airflow-net
+    networks: [airflow-net]
     volumes:
       - ./dags:/opt/airflow/dags
       - ./logs:/opt/airflow/logs
       - ./plugins:/opt/airflow/plugins
-    command: >
-      bash -c "airflow db migrate &&
-      airflow users create
-      --username admin
-      --password admin
-      --firstname Admin
-      --lastname User
-      --role Admin
-      --email admin@example.com
-      || true;
-      airflow connections add mongo_default
-      --conn-type mongo
-      --conn-host mongo
-      --conn-port 27017
-      --conn-schema airflow
-      || true"
+      - ./data:/opt/airflow/data
+    command:
+      - bash
+      - -lc
+      - |
+          set -e
+
+          airflow db migrate
+
+          airflow users create \
+            --username "${AIRFLOW_ADMIN_USER}" \
+            --password "${AIRFLOW_ADMIN_PASSWORD}" \
+            --firstname "${AIRFLOW_ADMIN_FIRSTNAME}" \
+            --lastname "${AIRFLOW_ADMIN_LASTNAME}" \
+            --role Admin \
+            --email "${AIRFLOW_ADMIN_EMAIL}" \
+          || true
+
+          airflow connections add mongo_default \
+            --conn-type mongo \
+            --conn-host mongo \
+            --conn-port 27017 \
+            --conn-login "${MONGO_ROOT_USERNAME}" \
+            --conn-password "${MONGO_ROOT_PASSWORD}" \
+            --conn-schema "${MONGO_DB}" \
+            --conn-extra '{"authSource":"admin"}' \
+          || true
+
+          airflow connections delete fs_default || true
+          airflow connections add fs_default \
+            --conn-type fs \
+            --conn-extra '{"path":"${FILE_PATH}"}'
     restart: "no"
 
   airflow-webserver:
     build: .
+    user: "50000:0"
     env_file:
       - .env
     depends_on:
@@ -70,12 +88,12 @@ services:
         condition: service_started
       airflow-init:
         condition: service_completed_successfully
-    networks:
-      - airflow-net
+    networks: [airflow-net]
     volumes:
       - ./dags:/opt/airflow/dags
       - ./logs:/opt/airflow/logs
       - ./plugins:/opt/airflow/plugins
+      - ./data:/opt/airflow/data
     command: webserver
     ports:
       - "8080:8080"
@@ -83,6 +101,7 @@ services:
 
   airflow-scheduler:
     build: .
+    user: "50000:0"
     env_file:
       - .env
     depends_on:
@@ -92,14 +111,32 @@ services:
         condition: service_started
       airflow-init:
         condition: service_completed_successfully
-    networks:
-      - airflow-net
+    networks: [airflow-net]
     volumes:
       - ./dags:/opt/airflow/dags
       - ./logs:/opt/airflow/logs
       - ./plugins:/opt/airflow/plugins
-      - ./data:/opt/airflow/data/
+      - ./data:/opt/airflow/data
     command: scheduler
+    restart: always
+
+  airflow-triggerer:
+    build: .
+    user: "50000:0"
+    env_file:
+      - .env
+    depends_on:
+      postgres:
+        condition: service_healthy
+      airflow-init:
+        condition: service_completed_successfully
+    networks: [airflow-net]
+    volumes:
+      - ./dags:/opt/airflow/dags
+      - ./logs:/opt/airflow/logs
+      - ./plugins:/opt/airflow/plugins
+      - ./data:/opt/airflow/data
+    command: triggerer
     restart: always
 
 networks:
